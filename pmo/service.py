@@ -403,21 +403,40 @@ class ServiceManager:
         env_copy = os.environ.copy()
         if env:
             env_copy.update(env)
-        
-        # 检查是否启用日志合并
+
+        # 检查是否启用日志合并, 时间戳和日志备份
         merge_logs = config.get('merge_logs', False)
-        
+        log_with_timestamp = config.get('log_with_timestamp', False)
+        log_backup = config.get('log_backup', False)
+
         # Prepare log files
         if merge_logs:
-            # 合并模式：stdout和stderr都写入同一个文件
-            merged_log = self.log_dir / f"{service_name}.log"
-            stdout_log = merged_log
-            stderr_log = merged_log
+            # 合并日志模式
+            if log_with_timestamp:
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+                log_filename = f"{service_name}_{timestamp}.log"
+            else:
+                log_filename = f"{service_name}.log"
+
+            stdout_log = self.log_dir / log_filename
+            stderr_log = stdout_log
+
+            if not log_with_timestamp and log_backup:
+                self._backup_log_file(stdout_log)
         else:
-            # 分离模式：使用原来的文件命名方式
-            stdout_log = self.log_dir / f"{service_name}-out.log"
-            stderr_log = self.log_dir / f"{service_name}-error.log"
-        
+            # 分离日志模式
+            if log_with_timestamp:
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+                stdout_log = self.log_dir / f"{service_name}-out_{timestamp}.log"
+                stderr_log = self.log_dir / f"{service_name}-error_{timestamp}.log"
+            else:
+                stdout_log = self.log_dir / f"{service_name}-out.log"
+                stderr_log = self.log_dir / f"{service_name}-error.log"
+
+            if not log_with_timestamp and log_backup:
+                self._backup_log_file(stdout_log)
+                self._backup_log_file(stderr_log)
+
         # Debug information
         logger.debug(f"Service '{service_name}': merge_logs={merge_logs}, log_dir={self.log_dir}, stdout_log={stdout_log}, stderr_log={stderr_log}")
         
@@ -464,6 +483,27 @@ class ServiceManager:
             logger.error(f"Failed to start service '{service_name}': {str(e)}")
             return False
     
+    def _backup_log_file(self, log_path: Path):
+        """
+        Backs up a log file by adding a numeric suffix.
+        e.g., app.log -> app.log.1
+        """
+        if not log_path.exists():
+            return
+
+        i = 1
+        while True:
+            backup_path = Path(f"{str(log_path)}.{i}")
+            if not backup_path.exists():
+                try:
+                    # Use shutil.move for cross-filesystem compatibility
+                    shutil.move(str(log_path), str(backup_path))
+                    logger.info(f"Backed up existing log file {log_path} to {backup_path}")
+                except Exception as e:
+                    logger.error(f"Failed to back up log file {log_path}: {e}")
+                break
+            i += 1
+
     def stop(self, service_name: str, timeout: int = 5) -> bool:
         """Stop a specified service and all its child processes with progress feedback."""
         pid = self.get_service_pid(service_name)
