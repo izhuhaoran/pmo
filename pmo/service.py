@@ -208,6 +208,10 @@ class ServiceManager:
             else:
                 # Clean up stale PID file
                 os.remove(pid_file)
+                # 删除 .logfile 文件
+                logfile_hint_path = self.log_dir / f"{service_name}.logfile"
+                if logfile_hint_path.exists():
+                    os.remove(logfile_hint_path)
                 # 删除相关的启动时间记录
                 if service_name in self.start_times:
                     del self.start_times[service_name]
@@ -462,7 +466,16 @@ class ServiceManager:
                     env=env_copy,
                     start_new_session=True  # Detach from current process group
                 )
-                
+
+            # 写入 .logfile 文件，内容为每个日志文件一行（合并模式一个，分离模式两个）
+            logfile_hint_path = self.log_dir / f"{service_name}.logfile"
+            with open(logfile_hint_path, 'w') as f:
+                if merge_logs:
+                    f.write(stdout_log.name + "\n")
+                else:
+                    f.write(stdout_log.name + "\n")
+                    f.write(stderr_log.name + "\n")
+
             # Save the PID to file
             with open(self.get_pid_file(service_name), 'w') as f:
                 f.write(str(process.pid))
@@ -670,10 +683,15 @@ class ServiceManager:
             pid_file = self.get_pid_file(service_name)
             if os.path.exists(pid_file):
                 os.remove(pid_file)
-                
+
+            # 删除 .logfile 文件
+            logfile_hint_path = self.log_dir / f"{service_name}.logfile"
+            if logfile_hint_path.exists():
+                os.remove(logfile_hint_path)
+
             if service_name in self.start_times:
                 del self.start_times[service_name]
-            
+
             start_time_file = self.pid_dir / f"{service_name}.time"
             if start_time_file.exists():
                 os.remove(start_time_file)
@@ -705,10 +723,15 @@ class ServiceManager:
         pid_file = self.get_pid_file(service_name)
         if os.path.exists(pid_file):
             os.remove(pid_file)
-        
+
+        # 删除 .logfile 文件
+        logfile_hint_path = self.log_dir / f"{service_name}.logfile"
+        if logfile_hint_path.exists():
+            os.remove(logfile_hint_path)
+
         if service_name in self.start_times:
             del self.start_times[service_name]
-        
+
         start_time_file = self.pid_dir / f"{service_name}.time"
         if start_time_file.exists():
             os.remove(start_time_file)

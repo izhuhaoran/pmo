@@ -146,6 +146,30 @@ class LogManager:
             service_name: 服务名称
             merge_logs: 是否合并日志。如果为True，stdout和stderr都指向同一个文件
         """
+        # 统一只读取 .logfile 文件，始终以该文件为准
+        logfile_hint_path = self.log_dir / f"{service_name}.logfile"
+        if logfile_hint_path.exists():
+            try:
+                with open(logfile_hint_path, 'r') as f:
+                    files = [line.strip() for line in f if line.strip()]
+                if len(files) == 1:
+                    # 合并模式
+                    merged_log_path = self.log_dir / files[0]
+                    return {
+                        'stdout': merged_log_path,
+                        'stderr': merged_log_path
+                    }
+                elif len(files) == 2:
+                    # 分离模式
+                    stdout_path = self.log_dir / files[0]
+                    stderr_path = self.log_dir / files[1]
+                    return {
+                        'stdout': stdout_path,
+                        'stderr': stderr_path
+                    }
+            except Exception:
+                pass
+        # 如果没有 .logfile 文件，回退到默认命名
         if merge_logs:
             # 合并模式：stdout和stderr都使用同一个文件
             merged_log_path = self.log_dir / f"{service_name}.log"
