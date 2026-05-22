@@ -29,6 +29,20 @@ if '.pyw' not in mimetypes.types_map:
 
 logger = logging.getLogger(__name__)
 
+class ReadableYamlDumper(yaml.SafeDumper):
+    """YAML dumper tuned for readable log output."""
+
+    def ignore_aliases(self, data):
+        return True
+
+
+def _represent_readable_str(dumper: yaml.SafeDumper, data: str):
+    style = "|" if "\n" in data else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
+
+
+ReadableYamlDumper.add_representer(str, _represent_readable_str)
+
 class ServiceManager:
     """Manages processes based on pmo.yml configuration."""
     
@@ -307,7 +321,17 @@ class ServiceManager:
     def get_running_services(self) -> List[str]:
         """Get list of currently running services."""
         return [name for name in self.get_service_names() if self.is_running(name)]
-    
+
+    def _dump_service_yaml(self, service_name: str) -> str:
+        """Return the effective YAML snippet for a service."""
+        return yaml.dump(
+            {service_name: self.services.get(service_name, {})},
+            Dumper=ReadableYamlDumper,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+        )
+
     def _is_python_script(self, cmd: str, cwd: Optional[str] = None) -> bool:
         """
         判断命令是否运行Python脚本
@@ -417,7 +441,7 @@ class ServiceManager:
         if merge_logs:
             # 合并日志模式
             if log_with_timestamp:
-                timestamp = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                 log_filename = f"{service_name}_{timestamp}.log"
             else:
                 log_filename = f"{service_name}.log"
@@ -430,7 +454,7 @@ class ServiceManager:
         else:
             # 分离日志模式
             if log_with_timestamp:
-                timestamp = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                 stdout_log = self.log_dir / f"{service_name}-out_{timestamp}.log"
                 stderr_log = self.log_dir / f"{service_name}-error_{timestamp}.log"
             else:
@@ -442,19 +466,23 @@ class ServiceManager:
                 self._backup_log_file(stderr_log)
 
         # Debug information
-        logger.debug(f"Service '{service_name}': merge_logs={merge_logs}, log_dir={self.log_dir}, stdout_log={stdout_log}, stderr_log={stderr_log}")
+        logger.info(f"Service '{service_name}': merge_logs={merge_logs}, log_dir={self.log_dir}, stdout_log={stdout_log}, stderr_log={stderr_log}")
         
         try:
             with open(stdout_log, 'a') as out, open(stderr_log, 'a') as err:
                 # Add timestamp to logs
                 timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                service_yaml = self._dump_service_yaml(service_name)
                 if merge_logs:
                     # 合并模式：只写一次启动信息
                     out.write(f"\n--- Starting service '{service_name}' at {timestamp} (merged logs) ---\n")
+                    out.write(service_yaml)
                 else:
                     # 分离模式：分别写入启动信息
                     out.write(f"\n--- Starting service '{service_name}' at {timestamp} ---\n")
                     err.write(f"\n--- Starting service '{service_name}' at {timestamp} ---\n")
+                    out.write(service_yaml)
+                    err.write(service_yaml)
                 
                 # Start the process
                 process = subprocess.Popen(
