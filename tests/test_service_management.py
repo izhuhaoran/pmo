@@ -6,6 +6,7 @@ import os
 import time
 import signal
 import psutil
+import yaml
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from pmo.service import ServiceManager
@@ -27,6 +28,65 @@ class TestServiceManagement:
         log_dir = manager.log_dir
         assert (log_dir / 'test-echo-out.log').exists()
         assert (log_dir / 'test-echo-error.log').exists()
+
+    @patch('subprocess.Popen')
+    def test_start_writes_service_yaml_after_merged_log_header(self, mock_popen, temp_dir):
+        """启动服务时在启动横幅后写入对应服务的 YAML 配置"""
+        config = {
+            'merged-service': {
+                'cmd': 'echo "Hello from merged service" \\\n  --flag value\n',
+                'merge_logs': True,
+                'env': {'TEST_ENV': 'test_value'}
+            }
+        }
+        config_path = Path(temp_dir) / 'merged.yml'
+        with open(config_path, 'w') as f:
+            yaml.safe_dump(config, f, sort_keys=False)
+
+        mock_process = MagicMock()
+        mock_process.pid = 12345
+        mock_popen.return_value = mock_process
+
+        manager = ServiceManager(config_path=config_path)
+        result = manager.start('merged-service')
+
+        assert result is True
+        log_path = manager.log_dir / 'merged-service.log'
+        content = log_path.read_text()
+        header = "--- Starting service 'merged-service'"
+        assert header in content
+        assert content.index("merged-service:") > content.index(header)
+        assert "cmd: |" in content
+        assert 'echo "Hello from merged service" \\' in content
+        assert "  --flag value" in content
+        assert "merge_logs: true" in content
+        assert "TEST_ENV: test_value" in content
+
+    @patch('subprocess.Popen')
+    def test_start_treats_yaml_null_env_value_as_empty_string(self, mock_popen, temp_dir):
+        """YAML 中的空 env 值应作为空字符串参与命令替换"""
+        config = {
+            'empty-prefix-service': {
+                'cmd': '${PREFIX_CMD} echo "hello"',
+                'env': {'PREFIX_CMD': None}
+            }
+        }
+        config_path = Path(temp_dir) / 'empty_prefix.yml'
+        with open(config_path, 'w') as f:
+            yaml.safe_dump(config, f, sort_keys=False)
+
+        mock_process = MagicMock()
+        mock_process.pid = 12345
+        mock_popen.return_value = mock_process
+
+        manager = ServiceManager(config_path=config_path)
+        with patch('os.environ.copy', return_value={}):
+            result = manager.start('empty-prefix-service')
+
+        assert result is True
+        args, kwargs = mock_popen.call_args
+        assert args[0] == ' echo "hello"'
+        assert kwargs['env']['PREFIX_CMD'] == ''
     
     @patch('subprocess.Popen')
     def test_start_all_services(self, mock_popen, basic_config_file):

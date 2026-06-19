@@ -1,0 +1,60 @@
+# Pipeline example: sequential task execution and parametric sweep
+
+# Base task
+worker:
+  cmd: |
+    echo "Starting worker with BATCH_SIZE=${BATCH_SIZE:-16}, LR=${LR:-0.001}"
+    sleep 5
+    echo "Worker done"
+  merge_logs: true
+  log_with_timestamp: true
+  env:
+    BATCH_SIZE: 16
+    LR: 0.001
+
+# Manual pipeline: run three tasks in order
+manual_pipeline:
+  pipeline: [worker_a, worker_b, worker_c]
+  pipeline_sleep: 2
+  merge_logs: true
+  log_with_timestamp: true
+
+worker_a:
+  extends: worker
+  env:
+    BATCH_SIZE: 8
+
+worker_b:
+  extends: worker
+  env:
+    BATCH_SIZE: 16
+
+worker_c:
+  extends: worker
+  env:
+    BATCH_SIZE: 32
+
+# Sweep: auto-generate sub-tasks from variable combinations
+batch_sweep:
+  extends: worker
+  pipeline_sweep:
+    BATCH_SIZE: [8, 16, 32, 64]
+  pipeline_sleep: 2
+
+# Standalone sweep (no extends, cmd defined inline)
+standalone_sweep:
+  cmd: |
+    echo "Running with LR=${LR}"
+    sleep 3
+  merge_logs: true
+  pipeline_sweep:
+    LR: [0.001, 0.01, 0.1]
+  pipeline_sleep: 2
+
+# Multi-variable sweep (cartesian product: 4 x 3 = 12 sub-tasks)
+grid_search:
+  extends: worker
+  pipeline_sweep:
+    BATCH_SIZE: [8, 16, 32, 64]
+    LR: [0.001, 0.01, 0.1]
+  pipeline_sleep: 2

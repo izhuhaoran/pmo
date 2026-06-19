@@ -8,6 +8,7 @@ import sys
 import socket
 import argparse
 import logging
+import time
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
@@ -89,7 +90,18 @@ def setup_arg_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser('status', aliases=['st'], help=f'{Emojis.INFO} Show detailed service status with process tree')
     status_parser.add_argument('service', nargs='*', default=['all'],
                              help='Service names or IDs (multiple allowed) or "all" to show all services')
-    
+
+    # Pipeline command (sequential task execution)
+    pipeline_parser = subparsers.add_parser('pipeline', help=f'{Emojis.START} Run tasks sequentially (start, wait, stop, next)')
+    pipeline_parser.add_argument('service', nargs='+',
+                                help='Service names or IDs to run in order')
+    pipeline_parser.add_argument('--sleep', type=int, default=5,
+                                help='Seconds to sleep between tasks (default: 5)')
+    pipeline_parser.add_argument('--flush', action='store_true',
+                                help='Flush logs before each task')
+    pipeline_parser.add_argument('--poll-interval', type=int, default=10,
+                                help='Seconds between status polls (default: 10)')
+
     return parser
 
 def show_service_prompt(manager: ServiceManager, command: str) -> None:
@@ -714,6 +726,122 @@ def resolve_multiple_services(manager: ServiceManager, service_specs: List[str])
     
     return resolved_services
 
+def handle_pipeline(manager: ServiceManager, log_manager: LogManager, args) -> bool:
+    """Run tasks sequentially: start -> wait for exit -> stop -> next."""
+    import psutil
+    import signal as _signal
+
+    service_names = resolve_multiple_services(manager, args.service)
+    if not service_names:
+        print_warning("No valid services specified.")
+        return False
+
+    sleep_between = args.sleep
+    flush_before = args.flush
+    poll_interval = args.poll_interval
+    total = len(service_names)
+
+    console.print(f"{Emojis.START} Sequential run: {total} task(s): {', '.join(service_names)}")
+    console.print(f"[dim]sleep={sleep_between}s  flush={flush_before}  poll={poll_interval}s[/]")
+    console.print()
+
+    seq_start = time.time()
+    interrupted = False
+    current_task = [None]
+
+    # SIGTERM handler: stop current sub-task before exiting
+    def _on_sigterm(signum, frame):
+        task = current_task[0]
+        console.print(f"\n{Emojis.STOP} SIGTERM received, cleaning up '{task}'...")
+        if task and manager.is_running(task):
+            manager.stop(task)
+        sys.exit(130)
+
+    prev_sigterm = _signal.signal(_signal.SIGTERM, _on_sigterm)
+
+    try:
+        for idx, name in enumerate(service_names, 1):
+            if interrupted:
+                break
+
+            current_task[0] = name
+            task_start = time.time()
+            console.print(f"{'='*60}")
+            console.print(f"{Emojis.START} [{idx}/{total}] Starting: {name}")
+            console.print(f"{'='*60}")
+
+            # Flush logs if requested
+            if flush_before:
+                running = manager.get_running_services()
+                log_manager.flush_logs([name], running_services=running)
+                console.print(f"[dim]Flushed logs for {name}[/]")
+
+            # Stop if already running (stale from previous run)
+            if manager.is_running(name):
+                console.print(f"[yellow]Service '{name}' already running, stopping first...[/]")
+                manager.stop(name)
+                time.sleep(2)
+
+            # Start
+            if not manager.start(name):
+                print_error(f"Failed to start '{name}', aborting sequence.")
+                return False
+
+            pid = manager.get_service_pid(name)
+            console.print(f"[dim]PID: {pid}, waiting for completion...[/]")
+
+            # Wait for process to exit
+            try:
+                while True:
+                    current_pid = manager.get_service_pid(name)
+                    if current_pid is None:
+                        break
+                    try:
+                        proc = psutil.Process(current_pid)
+                        proc.wait(timeout=poll_interval)
+                        break
+                    except psutil.TimeoutExpired:
+                        elapsed = int(time.time() - task_start)
+                        console.print(f"[dim]  {name}: running {elapsed}s...[/]")
+                    except psutil.NoSuchProcess:
+                        break
+            except KeyboardInterrupt:
+                console.print(f"\n{Emojis.STOP} Interrupted during '{name}', stopping...")
+                manager.stop(name)
+                interrupted = True
+                continue
+
+            task_elapsed = int(time.time() - task_start)
+
+            # Ensure cleanup
+            if manager.is_running(name):
+                console.print(f"[yellow]Ensuring cleanup for '{name}'...[/]")
+                manager.stop(name)
+
+            print_success(f"[{idx}/{total}] '{name}' completed in {task_elapsed}s")
+
+            # Sleep between tasks (skip after last)
+            if idx < total and sleep_between > 0 and not interrupted:
+                console.print(f"[dim]Sleeping {sleep_between}s before next task...[/]")
+                try:
+                    time.sleep(sleep_between)
+                except KeyboardInterrupt:
+                    console.print(f"\n{Emojis.STOP} Interrupted during sleep, stopping sequence.")
+                    interrupted = True
+
+    finally:
+        _signal.signal(_signal.SIGTERM, prev_sigterm)
+        current_task[0] = None
+
+    total_elapsed = int(time.time() - seq_start)
+    console.print()
+    if interrupted:
+        print_warning(f"Sequence interrupted after {idx}/{total} tasks ({total_elapsed}s total)")
+        return False
+    else:
+        print_success(f"All {total} tasks completed ({total_elapsed}s total)")
+        return True
+
 def main():
     """CLI application entry point"""
     # Header removed for more compact output
@@ -755,6 +883,8 @@ def main():
             success = handle_status(service_manager, args.service)
         elif args.command == 'flush':
             success = handle_flush(service_manager, log_manager, args.service)
+        elif args.command == 'pipeline':
+            success = handle_pipeline(service_manager, log_manager, args)
         else:
             parser.print_help()
             return 1

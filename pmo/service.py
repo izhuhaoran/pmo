@@ -2,6 +2,7 @@
 Service management functionality for PMO.
 """
 import os
+import sys
 import subprocess
 import signal
 import yaml
@@ -14,7 +15,7 @@ from datetime import datetime
 import re
 import shutil
 import mimetypes
-from typing import Dict, Union, List, Optional, Any, Tuple
+from typing import Dict, Union, List, Optional, Any, Tuple, Mapping
 from dotenv import dotenv_values
 
 from pmo.logs import console
@@ -186,22 +187,131 @@ class ServiceManager:
                 else:
                     return dict(conf)
 
-            validated_config = {}
+            # Step 3: resolve extends
+            resolved = {}
             for name in raw_config:
                 try:
                     merged = resolve_extends(name)
-                    if not isinstance(merged, dict) or "cmd" not in merged:
+                    if not isinstance(merged, dict):
                         logger.warning(f"Invalid configuration for service '{name}', skipping.")
                         continue
-                    validated_config[name] = merged
+                    resolved[name] = merged
                 except Exception as e:
                     logger.error(f"Error resolving extends for service '{name}': {e}")
+
+            # Step 4: expand pipeline_sweep into sub-tasks + pipeline
+            for name in list(resolved.keys()):
+                conf = resolved[name]
+                if "pipeline_sweep" in conf:
+                    extends_name = raw_config.get(name, {}).get("extends", name)
+                    sub_tasks = self._expand_sweep(name, extends_name, conf)
+                    resolved.update(sub_tasks)
+
+            # Step 5: convert pipeline -> cmd, validate
+            validated_config = {}
+            for name, conf in resolved.items():
+                if "pipeline" in conf:
+                    if "cmd" in conf:
+                        logger.warning(f"Service '{name}' has both 'pipeline' and 'cmd'. "
+                                       f"The existing cmd is ignored, pipeline generates its own.")
+                    conf["cmd"] = self._build_pipeline_cmd(conf)
+                if "cmd" not in conf:
+                    logger.warning(f"Invalid configuration for service '{name}' (no cmd, pipeline, or sweep), skipping.")
+                    continue
+                validated_config[name] = conf
 
             return validated_config
         except Exception as e:
             logger.error(f"Error loading configuration: {str(e)}")
             return {}
     
+    def _expand_sweep(self, name: str, extends_name: str, config: Dict) -> Dict[str, Dict]:
+        """Expand a sweep task into sub-tasks. Mutates config to become a pipeline task.
+
+        Sub-tasks are named ``_{extends_name}__{suffix}`` so the lineage is
+        clear when browsing ``pmo ls``.
+
+        Returns:
+            Dict of generated sub-task name -> config.
+        """
+        import copy
+        import itertools
+
+        sweep_vars = config.pop("pipeline_sweep")
+
+        # Preserve pipeline control fields
+        p_sleep = config.get("pipeline_sleep", 5)
+        p_flush = config.get("pipeline_flush", False)
+        p_poll = config.get("pipeline_poll_interval", 10)
+
+        # Base config for sub-tasks (strip pipeline/sweep control fields)
+        ctl_keys = {"pipeline_sweep", "pipeline_sleep", "pipeline_flush", "pipeline_poll_interval", "pipeline"}
+        base_config = {k: v for k, v in config.items() if k not in ctl_keys}
+
+        # Cartesian product of sweep variables
+        var_names = list(sweep_vars.keys())
+        var_values = [v if isinstance(v, list) else [v] for v in sweep_vars.values()]
+
+        sub_tasks = {}
+        sub_names = []
+
+        for combo in itertools.product(*var_values):
+            suffix = "_".join(f"{var}_{val}" for var, val in zip(var_names, combo))
+            sub_name = f"_{extends_name}__{suffix}"
+
+            # Deduplicate if another sweep already generated the same name
+            if sub_name in sub_tasks:
+                sub_name = f"_{name}__{extends_name}__{suffix}"
+
+            sub_config = copy.deepcopy(base_config)
+            if "env" not in sub_config:
+                sub_config["env"] = {}
+
+            for var, val in zip(var_names, combo):
+                sub_config["env"][var] = str(val)
+
+            # Auto-set exp_name so log files are unique per combination
+            base_exp = sub_config["env"].get("exp_name", "")
+            sub_config["env"]["exp_name"] = f"{base_exp}_{suffix}" if base_exp else suffix
+
+            sub_tasks[sub_name] = sub_config
+            sub_names.append(sub_name)
+
+        # Mutate config into a pipeline task referencing the generated sub-tasks
+        log_settings = {k: config[k] for k in ("merge_logs", "log_with_timestamp") if k in config}
+        config.clear()
+        config["pipeline"] = sub_names
+        config["pipeline_sleep"] = p_sleep
+        config["pipeline_flush"] = p_flush
+        config["pipeline_poll_interval"] = p_poll
+        config.update(log_settings)
+
+        logger.info(f"Expanded sweep '{name}' (extends: {extends_name}) "
+                     f"into {len(sub_names)} sub-tasks: {', '.join(sub_names)}")
+        return sub_tasks
+
+    def _build_pipeline_cmd(self, config: Dict) -> str:
+        """Build a ``pmo pipeline`` command string from a pipeline task config."""
+        import shlex
+        tasks = config["pipeline"]
+        if isinstance(tasks, str):
+            tasks = [t.strip() for t in tasks.split(",")]
+
+        sleep_val = config.get("pipeline_sleep", 5)
+        poll_val = config.get("pipeline_poll_interval", 10)
+        flush_flag = config.get("pipeline_flush", False)
+
+        parts = [
+            sys.executable, "-m", "pmo.cli",
+            "-f", os.path.abspath(self.config_path),
+            "pipeline",
+        ]
+        parts.extend(tasks)
+        parts.extend(["--sleep", str(sleep_val), "--poll-interval", str(poll_val)])
+        if flush_flag:
+            parts.append("--flush")
+        return " ".join(shlex.quote(p) for p in parts)
+
     def get_pid_file(self, service_name: str) -> Path:
         """Get the path to a service's PID file."""
         return self.pid_dir / f"{service_name}.pid"
@@ -332,6 +442,11 @@ class ServiceManager:
             allow_unicode=True,
         )
 
+    @staticmethod
+    def _normalize_env_vars(env_vars: Mapping[str, Any]) -> Dict[str, str]:
+        """Convert env values to strings, treating YAML null as an empty value."""
+        return {key: "" if value is None else str(value) for key, value in env_vars.items()}
+
     def _is_python_script(self, cmd: str, cwd: Optional[str] = None) -> bool:
         """
         判断命令是否运行Python脚本
@@ -391,12 +506,10 @@ class ServiceManager:
         # Prepare environment variables (优先级: config.env > .env > os.environ)
         from pmo.util import substitute_env_vars
         env = dict(os.environ)
+        env.update(self._normalize_env_vars(self.dotenv_vars))
         if "env" in config and isinstance(config["env"], dict):
-            config_env = {k: str(v) for k, v in config["env"].items()}
-            env.update(self.dotenv_vars)
+            config_env = self._normalize_env_vars(config["env"])
             env.update(config_env)
-        else:
-            env.update(self.dotenv_vars)
         # 环境变量替换: 支持 ${VAR}、${VAR:-default} 语法
         cmd = substitute_env_vars(cmd, env)
         # Prepare working directory
