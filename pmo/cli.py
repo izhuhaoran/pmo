@@ -898,5 +898,5 @@ def main():
         
     return 0 if success else 1
 
-if __name__ == "python":
+if __name__ == "__main__":
     sys.exit(main())
