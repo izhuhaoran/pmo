@@ -16,20 +16,53 @@ from pmo.service import ServiceManager
 from pmo.logs import LogManager, Emojis
 from pmo.logs import console, print_header, print_info, print_warning, print_error, print_success, print_service_table
 
-from rich.logging import RichHandler
-from rich.traceback import install
+from rich.text import Text
+from rich.traceback import install, Traceback
 from rich.markup import escape
 
 # Install Rich exception formatter
 install()
 
-# Configure Rich logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    datefmt="[%X]",
-    handlers=[RichHandler(rich_tracebacks=True, markup=True)]
-)
+# Per-level styles, resolved against the theme in pmo.logs.console
+_LOG_LEVEL_STYLES = {
+    "DEBUG": "dim",
+    "INFO": "info",
+    "WARNING": "warning",
+    "ERROR": "error",
+    "CRITICAL": "error",
+}
+
+
+class ConsoleLogHandler(logging.Handler):
+    """Plain single-line log handler (vLLM-style).
+
+    Renders each record as one inline line:
+        LEVEL MM-DD HH:MM:SS.mmm [file.py:line] message
+      * no table layout; level / time / location sit inline at the front
+      * continuation starts at column 0 instead of aligning under the message
+      * soft wrap only, so Rich never hard-wraps to the terminal width
+      * file paths keep clean whitespace boundaries so they stay clickable
+    """
+
+    def emit(self, record):
+        try:
+            ts = time.strftime("%m-%d %H:%M:%S", time.localtime(record.created))
+            ts = f"{ts}.{int(record.msecs):03d}"
+            style = _LOG_LEVEL_STYLES.get(record.levelname, "info")
+            line = Text.assemble(
+                (f"{record.levelname} ", style),
+                (f"{ts} ", "dim"),
+                (f"[{record.filename}:{record.lineno}] ", "dim"),
+                record.getMessage(),
+            )
+            console.print(line, soft_wrap=True)
+            if record.exc_info:
+                console.print(Traceback.from_exception(*record.exc_info))
+        except Exception:
+            self.handleError(record)
+
+
+logging.basicConfig(level=logging.INFO, handlers=[ConsoleLogHandler()])
 
 logger = logging.getLogger("pmo")
 

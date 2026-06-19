@@ -578,8 +578,13 @@ class ServiceManager:
                 self._backup_log_file(stdout_log)
                 self._backup_log_file(stderr_log)
 
-        # Debug information
-        logger.info(f"Service '{service_name}': merge_logs={merge_logs}, log_dir={self.log_dir}, stdout_log={stdout_log}, stderr_log={stderr_log}")
+        # Startup details (one path per line so each stays click-to-open)
+        logger.info(
+            f"Service '{service_name}': merge_logs={merge_logs}\n"
+            f"log_dir: {self.log_dir}\n"
+            f"stdout_log: {stdout_log}\n"
+            f"stderr_log: {stderr_log}"
+        )
         
         try:
             with open(stdout_log, 'a') as out, open(stderr_log, 'a') as err:
