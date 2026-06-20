@@ -61,7 +61,7 @@ pmo ls
 
 ```
 pmo start    [all | service-name | service-id]
-pmo stop     [all | service-name | service-id]
+pmo stop     [all | service-name | service-id] [--timeout N] [--kill-rounds N] [--kill-wait N]
 pmo restart  [all | service-name | service-id]
 pmo logs     [all | service-name | service-id]
 pmo flush    [all | service-name | service-id]
@@ -96,6 +96,80 @@ The `pmo.yml` file supports two formats:
 | `merge_logs` | Merge stdout and stderr into one log file (default: false) |
 | `log_with_timestamp` | Add timestamp to log filename (default: false) |
 | `log_backup` | Backup old log files before starting (default: false) |
+| `stop_timeout` | Seconds to wait for graceful SIGTERM exit before SIGKILL (default: 5) |
+| `stop_kill_rounds` | Max number of SIGKILL (-9) rounds for stuck processes (default: 3) |
+| `stop_kill_wait` | Seconds to wait after each SIGKILL (-9) round (default: 3) |
+
+### Stopping Services
+
+`pmo stop` shuts a service down by killing its **entire process tree**, which
+matters for multi-process jobs (training, vLLM, etc.) where a sloppy kill leaks
+child processes and holds onto GPU/CPU memory:
+
+1. Recursively records every process — the root, all descendants, **and** every
+   member of the root's process group (so nothing is missed).
+2. Sends `SIGTERM` to the whole group and waits up to `stop_timeout` seconds for
+   a graceful exit.
+3. If anything is still alive, sends up to `stop_kill_rounds` waves of
+   `SIGKILL` (`-9`), waiting `stop_kill_wait` seconds after each, until the tree
+   is gone. Zombie/defunct processes are ignored (they are already dead and get
+   reaped automatically), so the command returns as soon as everything is dead —
+   **you never have to press Enter.**
+
+#### Tuning
+
+Per-service in `pmo.yml`:
+
+```yaml
+train:
+  cmd: python train.py
+  stop_timeout: 10       # wait 10s for graceful SIGTERM exit (default: 5)
+  stop_kill_rounds: 5    # up to 5 SIGKILL -9 waves (default: 3)
+  stop_kill_wait: 2      # wait 2s after each wave (default: 3)
+```
+
+Or per-invocation on the CLI (overrides the config):
+
+```
+pmo stop train --timeout 10 --kill-rounds 5 --kill-wait 2
+pmo stop all -t 10
+```
+
+#### Example: normal exit
+
+```
+INFO 06-20 01:41:54.216 [service.py:760] Stopping service 'train' (4 processes)...
+📤 Sending SIGTERM to 4 processes...
+Waiting for 4 process(es) to exit... 1/5s
+💀 SIGKILL (-9) round 1/3: killing 4 process(es)...
+INFO 06-20 01:41:55.773 [service.py:814] Service 'train' stopped successfully
+⛔ Service 'train' stopped
+```
+
+(If the process exits cleanly on SIGTERM you instead see
+`✓ All processes terminated gracefully` and the SIGKILL step is skipped.)
+
+#### Example: processes that could not be killed
+
+If processes survive all `SIGKILL` rounds — almost always because they are stuck
+in uninterruptible I/O (`D` state, e.g. a hung NFS/GPU call) — PMO stops
+waiting, prints the surviving processes (`ps`-style, labeled with the task), and
+exits non-zero instead of hanging:
+
+```
+INFO 06-20 02:10:03.114 [service.py:760] Stopping service 'train' (3 processes)...
+📤 Sending SIGTERM to 3 processes...
+Waiting for 3 process(es) to exit... 1/5s
+💀 SIGKILL (-9) round 1/3: killing 3 process(es)...
+💀 SIGKILL (-9) round 2/3: killing 2 process(es)...
+💀 SIGKILL (-9) round 3/3: killing 2 process(es)...
+✗ Service 'train': 2 process(es) still alive after 3x SIGKILL -9 (likely stuck in uninterruptible I/O):
+  PID  PPID STAT COMMAND
+12345 12340 D    python train.py --local-rank 0
+12346 12340 D    python train.py --local-rank 1
+Retry the stop, or run manually: kill -9 12345 12346
+❌ Failed to stop 'train'
+```
 
 ### Extends (Inheritance)
 

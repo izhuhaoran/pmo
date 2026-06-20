@@ -96,6 +96,12 @@ def setup_arg_parser() -> argparse.ArgumentParser:
     stop_parser = subparsers.add_parser('stop', help=f'{Emojis.STOP} Stop services')
     stop_parser.add_argument('service', nargs='*',
                            help='Service names or IDs (multiple allowed) or "all" to stop all services')
+    stop_parser.add_argument('--timeout', '-t', type=int, default=None,
+                           help='Seconds to wait for graceful SIGTERM shutdown before SIGKILL (default: 5)')
+    stop_parser.add_argument('--kill-rounds', type=int, default=None,
+                           help='Max number of SIGKILL (-9) rounds for stuck processes (default: 3)')
+    stop_parser.add_argument('--kill-wait', type=int, default=None,
+                           help='Seconds to wait after each SIGKILL (-9) round (default: 3)')
     
     # Restart command
     restart_parser = subparsers.add_parser('restart', help=f'{Emojis.RESTART} Restart services')
@@ -190,7 +196,9 @@ def handle_start(manager: ServiceManager, service_specs: List[str], dry_run: boo
     
     return success
 
-def handle_stop(manager: ServiceManager, service_specs: List[str]) -> bool:
+def handle_stop(manager: ServiceManager, service_specs: List[str],
+                timeout: Optional[int] = None, kill_rounds: Optional[int] = None,
+                kill_wait: Optional[int] = None) -> bool:
     """Handle stop command with support for multiple services"""
     # Check if no services specified
     if not service_specs:
@@ -226,7 +234,7 @@ def handle_stop(manager: ServiceManager, service_specs: List[str]) -> bool:
     # Stop each service
     success = True
     for name in service_names:
-        if not manager.stop(name):
+        if not manager.stop(name, timeout=timeout, kill_rounds=kill_rounds, kill_wait=kill_wait):
             print_error(f"Failed to stop '{name}'")
             success = False
         else:
@@ -905,7 +913,9 @@ def main():
             services = args.service if args.service else ['all']
             success = handle_start(service_manager, services, dry_run=True)
         elif args.command == 'stop':
-            success = handle_stop(service_manager, args.service)
+            success = handle_stop(service_manager, args.service,
+                                  timeout=args.timeout, kill_rounds=args.kill_rounds,
+                                  kill_wait=args.kill_wait)
         elif args.command == 'restart':
             success = handle_restart(service_manager, args.service)
         elif args.command == 'log' or args.command == 'logs':
