@@ -286,7 +286,7 @@ class ServiceManager:
         config["pipeline_poll_interval"] = p_poll
         config.update(log_settings)
 
-        logger.info(f"Expanded sweep '{name}' (extends: {extends_name}) "
+        logger.debug(f"Expanded sweep '{name}' (extends: {extends_name}) "
                      f"into {len(sub_names)} sub-tasks: {', '.join(sub_names)}")
         return sub_tasks
 
